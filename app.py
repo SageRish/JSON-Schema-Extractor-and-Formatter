@@ -181,9 +181,10 @@ def load_and_parse_json(file_obj):
         # Default to (root) if available, else first list
         default_root = "(root)" if "(root)" in list_paths else (list_paths[0] if list_paths else None)
 
-        return data, gr.update(choices=all_keys, value=[]), gr.update(choices=list_paths, value=default_root), f"Successfully loaded. Found {len(all_keys)} unique fields."
+        # Reset selected fields state to empty list
+        return data, [], gr.update(choices=list_paths, value=default_root), f"Successfully loaded. Found {len(all_keys)} unique fields."
     except Exception as e:
-        return None, gr.update(choices=[]), gr.update(choices=[]), f"Error parsing JSON: {str(e)}"
+        return None, [], gr.update(choices=[]), f"Error parsing JSON: {str(e)}"
 
 def update_mapping_table(selected_fields):
     # Create a list of lists for the dataframe: [Input Path, Output Name]
@@ -311,6 +312,7 @@ with gr.Blocks(title="JSON Schema Extractor") as demo:
     
     # State
     json_data_state = gr.State()
+    selected_fields_state = gr.State(value=[])
     
     with gr.Row():
         # Left Panel: Input & Schema
@@ -320,9 +322,47 @@ with gr.Blocks(title="JSON Schema Extractor") as demo:
             status_msg = gr.Textbox(label="Status", interactive=False)
             
             gr.Markdown("### 2. Select Fields")
-            # Using CheckboxGroup to represent the flattened schema
-            # This satisfies "Each checkbox should represent a fully qualified path"
-            schema_selector = gr.CheckboxGroup(label="Available Fields", choices=[], interactive=True)
+            
+            @gr.render(inputs=[json_data_state], triggers=[json_data_state.change])
+            def render_schema(data):
+                if data is None:
+                    gr.Markdown("No data loaded.")
+                    return
+                
+                all_keys = sorted(list(extract_all_keys(data)))
+                tree = build_tree_from_keys(all_keys)
+                
+                def on_change(path, is_selected, current_selected):
+                    if is_selected:
+                        if path not in current_selected:
+                            current_selected.append(path)
+                    else:
+                        if path in current_selected:
+                            current_selected.remove(path)
+                    return current_selected
+
+                def recursive_ui(node, label="root"):
+                    if isinstance(node, dict):
+                        # Check for __self__ leaf
+                        if "__self__" in node:
+                            full_path = node["__self__"]
+                            cb = gr.Checkbox(label=f"{label} (value)", value=False)
+                            cb.change(fn=partial(on_change, full_path), inputs=[cb, selected_fields_state], outputs=[selected_fields_state])
+                        
+                        with gr.Accordion(label, open=False):
+                            for k, v in node.items():
+                                if k == "__self__": continue
+                                recursive_ui(v, k)
+                    else:
+                        # Leaf
+                        full_path = node
+                        cb = gr.Checkbox(label=label, value=False)
+                        cb.change(fn=partial(on_change, full_path), inputs=[cb, selected_fields_state], outputs=[selected_fields_state])
+
+                # Start recursion
+                # The tree root keys are the top level keys
+                for k, v in tree.items():
+                    recursive_ui(v, k)
             
         # Right Panel: Output Builder
         with gr.Column(scale=1):
@@ -352,12 +392,12 @@ with gr.Blocks(title="JSON Schema Extractor") as demo:
     file_input.upload(
         fn=load_and_parse_json,
         inputs=[file_input],
-        outputs=[json_data_state, schema_selector, root_path_selector, status_msg]
+        outputs=[json_data_state, selected_fields_state, root_path_selector, status_msg]
     )
     
-    schema_selector.change(
+    selected_fields_state.change(
         fn=update_mapping_table,
-        inputs=[schema_selector],
+        inputs=[selected_fields_state],
         outputs=[mapping_table]
     )
     
