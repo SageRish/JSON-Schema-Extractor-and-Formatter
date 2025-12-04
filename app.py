@@ -4,6 +4,38 @@ import csv
 import os
 import tempfile
 from typing import List, Dict, Any, Set
+from functools import partial
+
+def build_tree_from_keys(keys: List[str]) -> Dict[str, Any]:
+    """
+    Convert a list of dot-notation keys into a nested dictionary tree.
+    Leaf nodes are strings (the full path).
+    Branch nodes are dictionaries.
+    If a node is both a leaf and a branch (e.g. 'a' and 'a.b'), 
+    the value for 'a' is stored in the dictionary under '__self__'.
+    """
+    tree = {}
+    for key in sorted(keys):
+        parts = key.split('.')
+        current = tree
+        for part in parts[:-1]:
+            if part not in current:
+                current[part] = {}
+            
+            # If we encounter a node that was previously a leaf, convert it to a dict
+            if isinstance(current[part], str):
+                current[part] = {'__self__': current[part]}
+            
+            current = current[part]
+            
+        last_part = parts[-1]
+        if last_part in current:
+            # If it's already a dict, add self
+            if isinstance(current[last_part], dict):
+                current[last_part]['__self__'] = key
+        else:
+            current[last_part] = key
+    return tree
 
 def flatten_json(y: Any, parent_key: str = '', sep: str = '.') -> Dict[str, Any]:
     """
@@ -63,40 +95,32 @@ def extract_all_keys(data: Any, parent_key: str = '', sep: str = '.') -> Set[str
 def get_value_by_path(data: Any, path: str, sep: str = '.') -> Any:
     """
     Retrieve value from nested data using a dot-notation path.
-    Handles lists by aggregating values or taking the first match? 
-    For a "list of records" export, we usually iterate the list at the root.
-    
-    However, this tool seems to be generic. 
-    If the root is a list, we probably want to export rows.
-    If the root is a dict, we export one row.
+    Handles nested lists by collecting all matching values.
     """
     keys = path.split(sep)
     val = data
     
+    def collect_values(container, key):
+        results = []
+        if isinstance(container, dict):
+            v = container.get(key, None)
+            if v is not None:
+                results.append(v)
+        elif isinstance(container, list):
+            for item in container:
+                results.extend(collect_values(item, key))
+        return results
+
     try:
         for key in keys:
             if isinstance(val, dict):
                 val = val.get(key, None)
             elif isinstance(val, list):
-                # If we encounter a list during traversal, it's ambiguous.
-                # 1. Are we looking for a specific index? (Not supported by our key extractor which merges lists)
-                # 2. Do we want to map this over the list?
-                # For simplicity in this generic tool:
-                # If the path implies going deeper, and we hit a list, we might need to extract values from all items.
-                # But that complicates the return type (list vs single value).
-                # Let's try to find the key in the first item or return None.
-                # OR, if the key is an integer, access that index.
-                if key.isdigit():
-                    idx = int(key)
-                    if 0 <= idx < len(val):
-                        val = val[idx]
-                    else:
-                        return None
-                else:
-                    # We are trying to access a property 'name' on a list of objects.
-                    # We should probably return a list of those values, or join them.
-                    # Let's return a list of values.
-                    val = [v.get(key, None) for v in val if isinstance(v, dict)]
+                # If we are at a list, we need to "broadcast" the key access
+                # and collect all results from all items (and nested items)
+                val = collect_values(val, key)
+                if not val:
+                    val = None
             else:
                 return None
             
@@ -132,8 +156,20 @@ def load_and_parse_json(file_obj):
         return None, gr.update(choices=[]), gr.update(choices=[]), "No file uploaded."
     
     try:
-        with open(file_obj.name, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        # Handle file_obj being a file-like object or a path string
+        if hasattr(file_obj, 'read'):
+            # It's a file object (likely open). Read directly to avoid Windows locking issues.
+            if hasattr(file_obj, 'seek'):
+                file_obj.seek(0)
+            content = file_obj.read()
+            if isinstance(content, bytes):
+                content = content.decode('utf-8')
+            data = json.loads(content)
+        else:
+            # It's a path string or wrapper with .name
+            path = file_obj.name if hasattr(file_obj, 'name') else file_obj
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
         
         all_keys = sorted(list(extract_all_keys(data)))
         list_paths = find_list_paths(data)
@@ -213,12 +249,15 @@ def flatten_data_for_export(data: Any, selected_fields: List[str], mapping: Dict
     
     return rows
 
-def export_data_handler(data, mapping_df, output_format, file_name, root_path):
+def export_data_handler(data, mapping_df, output_format, file_name, root_path=None):
     if data is None:
         return None, "No data loaded."
     
     if mapping_df is None or mapping_df.empty:
         return None, "No fields selected."
+    
+    if root_path is None:
+        root_path = "(root)"
 
     # Convert dataframe to dict mapping
     try:
@@ -291,7 +330,7 @@ with gr.Blocks(title="JSON Schema Extractor") as demo:
             output_format = gr.Radio(choices=["CSV", "JSON"], value="CSV", label="Output Format")
             
             # New: Root Path Selector
-            root_path_selector = gr.Dropdown(label="Data Root Path (for iteration)", choices=["(root)"], value="(root)", allow_custom_value=True)
+            root_path_selector = gr.Dropdown(label="Data Root Path (for iteration)", choices=["(root)"], value="(root)", allow_custom_value=True, interactive=True)
             
             gr.Markdown("### 4. Field Mapping")
             gr.Markdown("Rename output columns if needed.")
