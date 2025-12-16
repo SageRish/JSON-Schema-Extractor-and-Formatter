@@ -3,6 +3,7 @@ __pycache__/
 *.py[codz]
 *$py.class
 updated_dataset.json
+test_datasets/
 
 # C extensions
 *.so
